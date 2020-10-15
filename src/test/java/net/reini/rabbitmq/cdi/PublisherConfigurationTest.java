@@ -30,7 +30,6 @@ import static org.mockito.Mockito.when;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
-import java.util.function.BiConsumer;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -38,8 +37,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import com.rabbitmq.client.AMQP.BasicProperties.Builder;
 import com.rabbitmq.client.AMQP.BasicProperties;
+import com.rabbitmq.client.AMQP.BasicProperties.Builder;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.MessageProperties;
 
@@ -50,13 +49,17 @@ class PublisherConfigurationTest {
   @Mock
   private Encoder<Object> encoder;
   @Mock
-  private BiConsumer<Object, PublishException> errorHandler;
+  private ErrorHandler<Object> errorHandler;
   @Mock
   private Channel channel;
   @Mock
   private List<ExchangeDeclaration> declarationsMock;
   @Mock
+  private PublishRetryHandler retryHandler;
+  @Mock
   private BasicPropertiesCalculator basicPropertiesCalculator;
+  @Mock
+  private PublishConfirmConfiguration publishConfirmConfiguration;
 
   private Builder propertiesBuilder;
   private Object event;
@@ -76,7 +79,7 @@ class PublisherConfigurationTest {
 
     PublisherConfiguration<Object> publisherConfig =
         new PublisherConfiguration(config, "exchange",
-            e -> "routingKey", propertiesBuilder, null, encoder, errorHandler, declarationsMock);
+            e -> "routingKey", propertiesBuilder, null, encoder, errorHandler, declarationsMock, retryHandler, publishConfirmConfiguration);
 
     publisherConfig.publish(channel, event);
 
@@ -98,23 +101,11 @@ class PublisherConfigurationTest {
     when(basicPropertiesCalculator.calculateBasicProperties(propertiesBuilder.contentType("application/sometype").build(),event)).thenReturn(expectedProperties);
     PublisherConfiguration<Object> publisherConfig =
         new PublisherConfiguration(config, "exchange",
-            e -> "routingKey", propertiesBuilder, basicPropertiesCalculator, encoder, errorHandler, declarationsMock);
+            e -> "routingKey", propertiesBuilder, basicPropertiesCalculator, encoder, errorHandler, declarationsMock, retryHandler, publishConfirmConfiguration);
 
     publisherConfig.publish(channel, event);
 
     verify(channel).basicPublish("exchange", "routingKey",
         expectedProperties, expectedData);
-  }
-
-  @Test
-  void testAcceptError() {
-    PublishException publishError = new PublishException("some error", null);
-    PublisherConfiguration<Object> publisherConfig = new PublisherConfiguration(config,
-        "exchange",
-        e -> "routingKey", propertiesBuilder, basicPropertiesCalculator, encoder, errorHandler, declarationsMock);
-
-    publisherConfig.accept(event, publishError);
-    
-    verify(errorHandler).accept(event, publishError);
   }
 }

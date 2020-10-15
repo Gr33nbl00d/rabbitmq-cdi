@@ -123,12 +123,36 @@ public class EventPublisher {
   }
 
   void publishEvent(Object event, TransactionPhase transactionPhase) {
+    if (event instanceof RabbitMqBatchEvent) {
+      processBatchEvent(event,transactionPhase);
+    }
+    else {
+      processSingleEvent(event, transactionPhase);
+    }
+  }
+
+  private void processBatchEvent(Object event, TransactionPhase transactionPhase) {
+    RabbitMqBatchEvent rabbitMqBatchEvent = (RabbitMqBatchEvent) event;
+    EventKey<Object> eventKey = (EventKey<Object>) EventKey.of(rabbitMqBatchEvent.getEventClass(), transactionPhase);
+    PublisherConfiguration<Object> configuration = (PublisherConfiguration<Object>) publisherConfigurations.get(eventKey);
+    if (configuration == null) {
+      logNoPublisherForEvent(event);
+    } else {
+      doPublishBatch(rabbitMqBatchEvent, providePublisher(eventKey, transactionPhase), configuration);
+    }
+  }
+
+  private void logNoPublisherForEvent(Object event) {
+    LOGGER.trace("No publisher configured for event {}", event);
+  }
+
+  private void processSingleEvent(Object event, TransactionPhase transactionPhase) {
     @SuppressWarnings("unchecked")
     EventKey<Object> eventKey =  (EventKey<Object>) EventKey.of(event.getClass(), transactionPhase);
     @SuppressWarnings("unchecked")
     PublisherConfiguration<Object> configuration = (PublisherConfiguration<Object>) publisherConfigurations.get(eventKey);
     if (configuration == null) {
-      LOGGER.trace("No publisher configured for event {}", event);
+      logNoPublisherForEvent(event);
     } else {
       doPublish(event, providePublisher(eventKey, transactionPhase), configuration);
     }
@@ -147,7 +171,19 @@ public class EventPublisher {
       LOGGER.debug("Published event successfully");
     } catch (PublishException e) {
       LOGGER.debug("Published event failed");
-      configuration.accept(event, e);
+      configuration.getErrorHandler().processError(event, e);
+    }
+  }
+
+  <T> void doPublishBatch(RabbitMqBatchEvent<T> batchEvent, MessagePublisher<T> publisher,
+      PublisherConfiguration<T> configuration) {
+    try {
+      LOGGER.debug("Start publishing batch event {} ({})...", batchEvent, configuration);
+      publisher.publishBatch(batchEvent, configuration);
+      LOGGER.debug("Published batch event successfully");
+    } catch (PublishException e) {
+      LOGGER.debug("Published batch event failed");
+      configuration.getErrorHandler().processError(batchEvent, e);
     }
   }
 

@@ -24,30 +24,27 @@
 
 package net.reini.rabbitmq.cdi;
 
-public interface MessagePublisher<T> {
+import java.util.List;
 
-  /**
-   * Publishes the given event using the given publisher configuration template.
-   * 
-   * @param event the event being published to RabbitMQ
-   * @param publisherConfiguration the default publisher configuration
-   * @throws PublishException if the event could not be delivered to RabbitMQ
-   */
-  void publish(T event, PublisherConfiguration<T> publisherConfiguration)
-      throws PublishException;
+public class RabbitMqBatchEvent<T> {
+  private final List<T> listEvents;
+  private final Class<T> eventClass;
 
-  /**
-   * Publishes the given batch event using the given publisher configuration template.
-   *
-   * @param batchEvent Contains the events being published to RabbitMQ
-   * @param publisherConfiguration the default publisher configuration
-   * @throws PublishException if the event could not be delivered to RabbitMQ
-   */
-  void publishBatch(RabbitMqBatchEvent<T> batchEvent, PublisherConfiguration<T> publisherConfiguration)
-      throws PublishException;
+  public RabbitMqBatchEvent(List<T> listEvents, Class<T> eventClass) {
+    this.listEvents = listEvents;
+    this.eventClass = eventClass;
+  }
 
-  /**
-   * Closes the publisher by closing its underlying channel.
-   */
-  void close();
+  public List<T> getListEvents() {
+    return listEvents;
+  }
+
+  public Class<T> getEventClass() {
+    return eventClass;
+  }
+
+  @Override
+  public String toString() {
+    return "Typ: "+eventClass.getSimpleName() + " Count:" + listEvents.size();
+  }
 }

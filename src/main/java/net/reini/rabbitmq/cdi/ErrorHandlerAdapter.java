@@ -24,30 +24,21 @@
 
 package net.reini.rabbitmq.cdi;
 
-public interface MessagePublisher<T> {
+import java.util.function.BiConsumer;
 
-  /**
-   * Publishes the given event using the given publisher configuration template.
-   * 
-   * @param event the event being published to RabbitMQ
-   * @param publisherConfiguration the default publisher configuration
-   * @throws PublishException if the event could not be delivered to RabbitMQ
-   */
-  void publish(T event, PublisherConfiguration<T> publisherConfiguration)
-      throws PublishException;
+class ErrorHandlerAdapter<T> extends DefaultErrorHandler<T> {
+  private BiConsumer<T, PublishException> handler;
 
-  /**
-   * Publishes the given batch event using the given publisher configuration template.
-   *
-   * @param batchEvent Contains the events being published to RabbitMQ
-   * @param publisherConfiguration the default publisher configuration
-   * @throws PublishException if the event could not be delivered to RabbitMQ
-   */
-  void publishBatch(RabbitMqBatchEvent<T> batchEvent, PublisherConfiguration<T> publisherConfiguration)
-      throws PublishException;
+  public ErrorHandlerAdapter(BiConsumer<T, PublishException> handler) {
+    this.handler = handler;
+  }
 
-  /**
-   * Closes the publisher by closing its underlying channel.
-   */
-  void close();
+  @Override
+  public void processError(T event, PublishException publishError) {
+    handler.accept(event, publishError);
+  }
+
+  @Override
+  public void processError(RabbitMqBatchEvent<T> batchEvent, PublishException publishError) {
+  }
 }

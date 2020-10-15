@@ -24,30 +24,9 @@
 
 package net.reini.rabbitmq.cdi;
 
-public interface MessagePublisher<T> {
+import java.io.IOException;
+import java.util.concurrent.TimeoutException;
 
-  /**
-   * Publishes the given event using the given publisher configuration template.
-   * 
-   * @param event the event being published to RabbitMQ
-   * @param publisherConfiguration the default publisher configuration
-   * @throws PublishException if the event could not be delivered to RabbitMQ
-   */
-  void publish(T event, PublisherConfiguration<T> publisherConfiguration)
-      throws PublishException;
-
-  /**
-   * Publishes the given batch event using the given publisher configuration template.
-   *
-   * @param batchEvent Contains the events being published to RabbitMQ
-   * @param publisherConfiguration the default publisher configuration
-   * @throws PublishException if the event could not be delivered to RabbitMQ
-   */
-  void publishBatch(RabbitMqBatchEvent<T> batchEvent, PublisherConfiguration<T> publisherConfiguration)
-      throws PublishException;
-
-  /**
-   * Closes the publisher by closing its underlying channel.
-   */
-  void close();
+public interface PublishFunction {
+  void publish() throws IOException, TimeoutException, EncodeException, PublishException;
 }

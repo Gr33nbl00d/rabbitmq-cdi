@@ -24,30 +24,48 @@
 
 package net.reini.rabbitmq.cdi;
 
-public interface MessagePublisher<T> {
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-  /**
-   * Publishes the given event using the given publisher configuration template.
-   * 
-   * @param event the event being published to RabbitMQ
-   * @param publisherConfiguration the default publisher configuration
-   * @throws PublishException if the event could not be delivered to RabbitMQ
-   */
-  void publish(T event, PublisherConfiguration<T> publisherConfiguration)
-      throws PublishException;
+import java.util.concurrent.TimeoutException;
 
-  /**
-   * Publishes the given batch event using the given publisher configuration template.
-   *
-   * @param batchEvent Contains the events being published to RabbitMQ
-   * @param publisherConfiguration the default publisher configuration
-   * @throws PublishException if the event could not be delivered to RabbitMQ
-   */
-  void publishBatch(RabbitMqBatchEvent<T> batchEvent, PublisherConfiguration<T> publisherConfiguration)
-      throws PublishException;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
-  /**
-   * Closes the publisher by closing its underlying channel.
-   */
-  void close();
+class DefaultErrorHandlerTest {
+
+  private DefaultErrorHandler defaultErrorHandler;
+
+  @BeforeEach
+  public void setUp() {
+    defaultErrorHandler = new DefaultErrorHandler();
+  }
+
+  @Test
+  void processError() {
+    defaultErrorHandler.processError(new Object(), null);
+  }
+
+  @Test
+  void testProcessError() {
+    defaultErrorHandler.processError(new RabbitMqBatchEvent(null, null), null);
+  }
+
+  @Test
+  void testEncodeExceptionIsNotRetryable() {
+    final boolean result = defaultErrorHandler.isRetryable(new EncodeException(null));
+    assertFalse(result);
+  }
+
+  @Test
+  void testTimeoutExceptionIsRetryable() {
+    final boolean result = defaultErrorHandler.isRetryable(new TimeoutException());
+    assertTrue(result);
+  }
+
+  @Test
+  void testIoExceptionIsRetryable() {
+    final boolean result = defaultErrorHandler.isRetryable(new TimeoutException());
+    assertTrue(result);
+  }
 }

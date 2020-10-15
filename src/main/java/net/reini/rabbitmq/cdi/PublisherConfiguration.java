@@ -26,7 +26,6 @@ package net.reini.rabbitmq.cdi;
 
 import java.io.IOException;
 import java.util.List;
-import java.util.function.BiConsumer;
 import java.util.function.Function;
 
 import com.rabbitmq.client.AMQP.BasicProperties;
@@ -39,26 +38,30 @@ import com.rabbitmq.client.Channel;
  *
  * @author Patrick Reinhart
  */
-final class PublisherConfiguration<T> implements BiConsumer<T, PublishException> {
+final class PublisherConfiguration<T> {
   private final ConnectionConfig config;
   private final BasicProperties basicProperties;
   private final Encoder<T> messageEncoder;
   private final String exchange;
   private final Function<T, String> routingKeyFunction;
-  private final BiConsumer<T, PublishException> errorHandler;
+  private final ErrorHandler<T> errorHandler;
   private final List<Declaration> declarations;
   private final BasicPropertiesCalculator<T> basicPropertiesCalculator;
+  private final PublishRetryHandler<T> publishRetryHandler;
+  private final PublishConfirmConfiguration publishConfirmConfiguration;
 
   PublisherConfiguration(ConnectionConfig config, String exchange,
       Function<T, String> routingKeyFunction,
       Builder basicPropertiesBuilder, BasicPropertiesCalculator<T> basicPropertiesCalculator, Encoder<T> encoder,
-      BiConsumer<T, PublishException> errorHandler, List<Declaration> declarations) {
+      ErrorHandler<T> errorHandler, List<Declaration> declarations, PublishRetryHandler publishRetryHandler, PublishConfirmConfiguration publishConfirmConfiguration) {
     this.config = config;
     this.exchange = exchange;
     this.routingKeyFunction = routingKeyFunction;
     this.messageEncoder = encoder;
     this.errorHandler = errorHandler;
     this.declarations = declarations;
+    this.publishRetryHandler = publishRetryHandler;
+    this.publishConfirmConfiguration = publishConfirmConfiguration;
     String contentType = messageEncoder.contentType();
     if (contentType != null) {
       basicPropertiesBuilder.contentType(contentType);
@@ -92,8 +95,15 @@ final class PublisherConfiguration<T> implements BiConsumer<T, PublishException>
     channel.basicPublish(exchange, routingKeyFunction.apply(event), basicPropertiesToSend, data);
   }
 
-  @Override
-  public void accept(T event, PublishException publishError) {
-    errorHandler.accept(event, publishError);
+  public PublishRetryHandler<T> getPublishRetryHandler() {
+    return publishRetryHandler;
+  }
+
+  public ErrorHandler<T> getErrorHandler() {
+    return errorHandler;
+  }
+
+  public PublishConfirmConfiguration getPublisherConfirmConfiguration() {
+    return this.publishConfirmConfiguration;
   }
 }

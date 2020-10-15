@@ -60,7 +60,7 @@ class ExchangeBindingTest {
   @Mock
   private Encoder<TestEvent> encoder;
   @Mock
-  private BiConsumer<TestEvent, PublishException> errorHandler;
+  private ErrorHandler<TestEvent> errorHandler;
 
   private BasicProperties basicProperties;
   private ExchangeBinding<TestEvent> binding;
@@ -95,6 +95,35 @@ class ExchangeBindingTest {
     assertSame(binding, binding.withRoutingKey((testEvent) -> "calculatedkey"));
     assertEquals("calculatedkey", binding.getRoutingKey(event));
   }
+
+  @Test
+  void withPublishRetryHandler() {
+    final PublishRetryHandler<TestEvent> publishRetryHandler = binding.getPublishRetryHandler();
+    assertEquals(DefaultPublishRetryHandler.class, publishRetryHandler.getClass());
+    final PublishRetryHandler<TestEvent> expectedRetryHandler = (publishFunction, errorHandler) -> {
+    };
+    assertSame(binding, binding.withPublishRetryHandler(expectedRetryHandler));
+    assertSame(expectedRetryHandler, binding.getPublishRetryHandler());
+  }
+
+  @Test
+  void withPublisherConfirms() {
+    final NullPointerException nullPointerException = assertThrows(NullPointerException.class, () -> {
+      binding.withPublisherConfirms(null);
+    });
+    assertEquals("PublishConfirmConfiguration must not be null", nullPointerException.getMessage());
+    final PublishConfirmConfiguration publishConfirmConfiguration = binding.getPublishConfirmConfiguration();
+    assertEquals(false, publishConfirmConfiguration.usePublisherConfirms());
+    assertEquals(0, publishConfirmConfiguration.getTimeout());
+    final PublishConfirmConfiguration expectedConfiguration = new PublishConfirmConfiguration(true, 1000);
+    binding.withPublisherConfirms(expectedConfiguration);
+    final PublishConfirmConfiguration returnedValue = binding.getPublishConfirmConfiguration();
+    assertSame(expectedConfiguration, returnedValue);
+    assertEquals(true, returnedValue.usePublisherConfirms());
+    assertEquals(1000, returnedValue.getTimeout());
+  }
+
+  @Test
   void withEncoder() {
     assertEquals(JsonEncoder.class, binding.getEncoder().getClass());
     assertSame(binding, binding.withEncoder(encoder));
@@ -103,7 +132,7 @@ class ExchangeBindingTest {
 
   @Test
   void testAddExchangeDeclarations() {
-    List<Declaration> expectedDeclarations=new ArrayList<>();
+    List<Declaration> expectedDeclarations = new ArrayList<>();
     ExchangeDeclaration declaration1 = new ExchangeDeclaration("hello");
     ExchangeDeclaration declaration2 = new ExchangeDeclaration("hello2");
     expectedDeclarations.add(declaration1);
@@ -111,14 +140,14 @@ class ExchangeBindingTest {
 
     binding.withDeclaration(declaration1);
     binding.withDeclaration(declaration2);
-    
+
     List<ExchangeDeclaration> result = binding.getExchangeDeclarations();
-    assertArrayEquals(expectedDeclarations.toArray(),result.toArray());
+    assertArrayEquals(expectedDeclarations.toArray(), result.toArray());
   }
 
   @Test
   void testAddQueueDeclarations() {
-    List<Declaration> expectedDeclarations=new ArrayList<>();
+    List<Declaration> expectedDeclarations = new ArrayList<>();
     QueueDeclaration declaration1 = new QueueDeclaration("hello");
     QueueDeclaration declaration2 = new QueueDeclaration("hello2");
     expectedDeclarations.add(declaration1);
@@ -128,20 +157,20 @@ class ExchangeBindingTest {
     binding.withDeclaration(declaration2);
 
     List<QueueDeclaration> result = binding.getQueueDeclarations();
-    assertArrayEquals(expectedDeclarations.toArray(),result.toArray());
+    assertArrayEquals(expectedDeclarations.toArray(), result.toArray());
   }
 
   @Test
   void testAddBindingDeclarations() {
     QueueDeclaration qd = new QueueDeclaration("hello");
     ExchangeDeclaration bd = new ExchangeDeclaration("hello2");
-    List<Declaration> expectedDeclarations=new ArrayList<>();
-    BindingDeclaration declaration1 = new BindingDeclaration(qd,bd);
+    List<Declaration> expectedDeclarations = new ArrayList<>();
+    BindingDeclaration declaration1 = new BindingDeclaration(qd, bd);
     expectedDeclarations.add(declaration1);
     binding.withDeclaration(declaration1);
 
     List<BindingDeclaration> result = binding.getBindingDeclarations();
-    assertArrayEquals(expectedDeclarations.toArray(),result.toArray());
+    assertArrayEquals(expectedDeclarations.toArray(), result.toArray());
   }
 
   @Test
@@ -161,7 +190,7 @@ class ExchangeBindingTest {
     assertNotNull(binding.getErrorHandler());
     assertSame(binding, binding.withErrorHandler(errorHandler));
     assertEquals(errorHandler, binding.getErrorHandler());
-    assertSame(binding, binding.withErrorHandler(null));
+    assertSame(binding, binding.withErrorHandler((BiConsumer<TestEvent, PublishException>) null));
     assertNotEquals(errorHandler, binding.getErrorHandler());
   }
 
@@ -185,7 +214,7 @@ class ExchangeBindingTest {
   void withHeader_preserving_existing_headers() {
     BasicProperties properties =
         PERSISTENT_BASIC.builder().headers(singletonMap("oldheader", "oldvalue")).build();
-    binding.withProperties(properties);
+    assertSame(binding, binding.withProperties(properties));
     assertSame(binding, binding.withHeader("header", "value"));
     Map<String, Object> expectedHeaders = new HashMap<>();
     expectedHeaders.put("oldheader", "oldvalue");

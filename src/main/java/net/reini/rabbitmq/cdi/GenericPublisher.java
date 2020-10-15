@@ -25,6 +25,7 @@
 package net.reini.rabbitmq.cdi;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeoutException;
 
@@ -36,8 +37,6 @@ import com.rabbitmq.client.Channel;
 public class GenericPublisher<T> implements MessagePublisher<T> {
   private static final Logger LOGGER = LoggerFactory.getLogger(GenericPublisher.class);
 
-  public static final int DEFAULT_RETRY_ATTEMPTS = 3;
-  public static final int DEFAULT_RETRY_INTERVAL = 1000;
   private final DeclarerRepository declarerRepository;
   private final ConnectionRepository connectionRepository;
 
@@ -46,49 +45,72 @@ public class GenericPublisher<T> implements MessagePublisher<T> {
     this.declarerRepository = new DeclarerRepository();
   }
 
-  /**
-   * Handles an exception depending on the already used attempts to send a message. Also performs a
-   * soft reset of the currently used channel.
-   *
-   * @param attempt Current attempt count
-   * @param cause The thrown exception
-   *
-   * @throws PublishException if the maximum amount of attempts is exceeded
-   */
-  protected void handleIoException(int attempt, Throwable cause) throws PublishException {
-    if (attempt == DEFAULT_RETRY_ATTEMPTS) {
-      throw new PublishException("Unable to send message after " + attempt + " attempts", cause);
-    }
-    sleepBeforeRetry();
+  @Override
+  public void publish(T event, PublisherConfiguration<T> publisherConfiguration)
+      throws PublishException {
+    final PublishRetryHandler<T> retryHandler = publisherConfiguration.getPublishRetryHandler();
+    retryHandler.execute(() -> {
+      try (Channel channel =
+          connectionRepository.getConnection(publisherConfiguration.getConfig()).createChannel()) {
+        if (publisherConfiguration.getPublisherConfirmConfiguration().usePublisherConfirms()) {
+          channel.confirmSelect();
+        }
+        List<Declaration> declarations = publisherConfiguration.getDeclarations();
+        declarerRepository.declare(channel, declarations);
+        publisherConfiguration.publish(channel, event);
+        if (publisherConfiguration.getPublisherConfirmConfiguration().usePublisherConfirms()) {
+          waitForConfirms(channel, publisherConfiguration.getPublisherConfirmConfiguration());
+        }
+      } catch (NoConfirmationReceivedException e) {
+        throw new PublishException(e);
+      }
+    }, publisherConfiguration.getErrorHandler());
+
   }
 
-  protected void sleepBeforeRetry() {
+  private void waitForConfirms(Channel channel, PublishConfirmConfiguration publisherConfirmConfiguration) throws NoConfirmationReceivedException {
     try {
-      Thread.sleep(DEFAULT_RETRY_INTERVAL);
+      if (publisherConfirmConfiguration.getTimeout() == 0) {
+        channel.waitForConfirmsOrDie();
+      } else {
+        channel.waitForConfirmsOrDie(publisherConfirmConfiguration.getTimeout());
+      }
+    } catch (IOException | TimeoutException e) {
+      throw new NoConfirmationReceivedException(e);
     } catch (InterruptedException e) {
-      LOGGER.warn("Sending message interrupted while waiting for retry attempt", e);
+      Thread.currentThread().interrupt();
+      throw new NoConfirmationReceivedException(e);
     }
   }
 
   @Override
-  public void publish(T event, PublisherConfiguration<T> publisherConfiguration)
+  public void publishBatch(RabbitMqBatchEvent<T> batchEvent, PublisherConfiguration<T> publisherConfiguration)
       throws PublishException {
-    for (int attempt = 1; attempt <= DEFAULT_RETRY_ATTEMPTS; attempt++) {
-      if (attempt > 1) {
-        LOGGER.debug("Attempt {} to send message", Integer.valueOf(attempt));
-      }
+    final PublishRetryHandler<T> retryHandler = publisherConfiguration.getPublishRetryHandler();
+    final List<T> listEventsToExecute = new ArrayList<>(batchEvent.getListEvents());
+    retryHandler.execute(() -> {
       try (Channel channel =
           connectionRepository.getConnection(publisherConfiguration.getConfig()).createChannel()) {
+        if (publisherConfiguration.getPublisherConfirmConfiguration().usePublisherConfirms()) {
+          channel.confirmSelect();
+        }
         List<Declaration> declarations = publisherConfiguration.getDeclarations();
-        declarerRepository.declare(channel,declarations);
-        publisherConfiguration.publish(channel, event);
+        declarerRepository.declare(channel, declarations);
+        try {
+          for (T listEvent : new ArrayList<>(listEventsToExecute)) {
+            publisherConfiguration.publish(channel, listEvent);
+            listEventsToExecute.remove(listEvent);
+          }
+        } finally {
+          if (publisherConfiguration.getPublisherConfirmConfiguration().usePublisherConfirms() && listEventsToExecute.size() < batchEvent.getListEvents().size()) {
+            waitForConfirms(channel, publisherConfiguration.getPublisherConfirmConfiguration());
+          }
+        }
         return;
-      } catch (EncodeException e) {
-        throw new PublishException("Unable to serialize event", e);
-      } catch (IOException | TimeoutException e) {
-        handleIoException(attempt, e);
+      } catch (NoConfirmationReceivedException e) {
+        throw new PublishException(e);
       }
-    }
+    }, publisherConfiguration.getErrorHandler());
   }
 
   /**

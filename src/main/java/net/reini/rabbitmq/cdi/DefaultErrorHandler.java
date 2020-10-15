@@ -24,30 +24,23 @@
 
 package net.reini.rabbitmq.cdi;
 
-public interface MessagePublisher<T> {
+public class DefaultErrorHandler<T> implements ErrorHandler<T> {
+  @Override
+  public void processError(T event, PublishException publishError) {
+    //no operation
+  }
 
-  /**
-   * Publishes the given event using the given publisher configuration template.
-   * 
-   * @param event the event being published to RabbitMQ
-   * @param publisherConfiguration the default publisher configuration
-   * @throws PublishException if the event could not be delivered to RabbitMQ
-   */
-  void publish(T event, PublisherConfiguration<T> publisherConfiguration)
-      throws PublishException;
+  @Override
+  public void processError(RabbitMqBatchEvent<T> batchEvent, PublishException publishError) {
+    //no operation
+  }
 
-  /**
-   * Publishes the given batch event using the given publisher configuration template.
-   *
-   * @param batchEvent Contains the events being published to RabbitMQ
-   * @param publisherConfiguration the default publisher configuration
-   * @throws PublishException if the event could not be delivered to RabbitMQ
-   */
-  void publishBatch(RabbitMqBatchEvent<T> batchEvent, PublisherConfiguration<T> publisherConfiguration)
-      throws PublishException;
-
-  /**
-   * Closes the publisher by closing its underlying channel.
-   */
-  void close();
+  @Override
+  public boolean isRetryable(Exception e) {
+    if (e instanceof EncodeException || e instanceof RuntimeException) {
+      return false;
+    } else {
+      return true;
+    }
+  }
 }

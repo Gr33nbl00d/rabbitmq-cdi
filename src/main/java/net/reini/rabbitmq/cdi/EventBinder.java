@@ -270,21 +270,19 @@ public abstract class EventBinder {
 
   <T> void bindExchange(ExchangeBinding<T> exchangeBinding) {
     Class<T> eventType = exchangeBinding.getEventType();
-    BiConsumer<T, PublishException> errorHandler = exchangeBinding.getErrorHandler();
+    ErrorHandler<T> errorHandler = exchangeBinding.getErrorHandler();
     Encoder<T> encoder = exchangeBinding.getEncoder();
     String exchange = exchangeBinding.getExchange();
     PublisherConfiguration<T> cfg = new PublisherConfiguration<T>(configuration, exchange,
         exchangeBinding.routingKeyFunction, exchangeBinding.getBasicPropertiesBuilder(), exchangeBinding.basicPropertiesCalculator, encoder, errorHandler,
-        exchangeBinding.getAllDeclarations());
+        exchangeBinding.getAllDeclarations(), exchangeBinding.publishRetryHandler, exchangeBinding.publishConfirmConfiguration);
     eventPublisher.addEvent(EventKey.of(eventType, exchangeBinding.getTransactionPhase()), cfg);
     LOGGER.info("Binding between exchange {} and event type {} activated", exchange,
         eventType.getName());
   }
 
-  static <T> BiConsumer<T, PublishException> nop() {
-    return (event, cause) -> {
-      // no operation
-    };
+  static <T> ErrorHandler<T> nop() {
+    return new DefaultErrorHandler();
   }
 
   static String uriDecode(String value) {
@@ -391,7 +389,7 @@ public abstract class EventBinder {
       return queueDeclarations;
     }
 
-    final List<Declaration> getAllDeclarations(){
+    final List<Declaration> getAllDeclarations() {
       ArrayList<Declaration> allDeclarations = new ArrayList<>();
       allDeclarations.addAll(exchangeDeclarations);
       allDeclarations.addAll(queueDeclarations);
@@ -568,8 +566,10 @@ public abstract class EventBinder {
     private Encoder<T> encoder;
     private Builder basicPropertiesBuilder;
     private TransactionPhase transactionPhase;
-    private BiConsumer<T, PublishException> errorHandler;
+    private ErrorHandler<T> errorHandler;
     private BasicPropertiesCalculator<T> basicPropertiesCalculator;
+    private PublishRetryHandler<T> publishRetryHandler;
+    private PublishConfirmConfiguration publishConfirmConfiguration;
 
     ExchangeBinding(Class<T> eventType, String exchange) {
       this.eventType = eventType;
@@ -579,9 +579,11 @@ public abstract class EventBinder {
       routingKeyFunction = e -> "";
       transactionPhase = TransactionPhase.IN_PROGRESS;
       errorHandler = nop();
+      publishRetryHandler = new DefaultPublishRetryHandler<>();
       basicPropertiesBuilder = MessageProperties.BASIC.builder().headers(headers);
       LOGGER.info("Binding created between exchange {} and event type {}", exchange,
           eventType.getSimpleName());
+      publishConfirmConfiguration = new PublishConfirmConfiguration(false);
     }
 
     Class<T> getEventType() {
@@ -600,7 +602,7 @@ public abstract class EventBinder {
       return encoder;
     }
 
-    BiConsumer<T, PublishException> getErrorHandler() {
+    ErrorHandler<T> getErrorHandler() {
       return errorHandler;
     }
 
@@ -614,6 +616,14 @@ public abstract class EventBinder {
 
     BasicPropertiesCalculator<T> getBasicPropertiesCalculator() {
       return basicPropertiesCalculator;
+    }
+
+    PublishRetryHandler<T> getPublishRetryHandler() {
+      return publishRetryHandler;
+    }
+
+    PublishConfirmConfiguration getPublishConfirmConfiguration() {
+      return publishConfirmConfiguration;
     }
 
     /**
@@ -717,11 +727,21 @@ public abstract class EventBinder {
      * @param handler The custom error handler
      * @return the exchange binding
      */
-    public ExchangeBinding<T> withErrorHandler(BiConsumer<T, PublishException> handler) {
+    public ExchangeBinding<T> withErrorHandler(ErrorHandler<T> handler) {
       this.errorHandler = handler == null ? nop() : handler;
       return this;
     }
 
+    /**
+     * Sets the given error handler to be used when a event could not be published to RabbitMQ.
+     *
+     * @param handler The custom error handler
+     * @return the exchange binding
+     */
+    public ExchangeBinding<T> withErrorHandler(BiConsumer<T, PublishException> handler) {
+      this.errorHandler = new ErrorHandlerAdapter(handler);
+      return this;
+    }
 
     /**
      * Adds a queue declaration to this ExchangeBinding The declaration is automatically applied to
@@ -756,6 +776,31 @@ public abstract class EventBinder {
      */
     public ExchangeBinding<T> withDeclaration(BindingDeclaration bindingDeclaration) {
       add(bindingDeclaration);
+      return this;
+    }
+
+    /**
+     * Configures the retry logic in case of error during publishing
+     *
+     * @param publishRetryHandler The handler managing the retry logic in case of failing message publishing
+     * @return the queue binding
+     */
+    public ExchangeBinding<T> withPublishRetryHandler(PublishRetryHandler<T> publishRetryHandler) {
+      Objects.requireNonNull(publishRetryHandler, "PublishRetryHandler must not be null");
+      this.publishRetryHandler = publishRetryHandler;
+      return this;
+    }
+
+    /**
+     * Adds a configuraiton wether to use publisher confirms or not.
+     * Also contains a optional timeout value in case publisher confirms are enabled
+     *
+     * @param publishConfirmConfiguration The configuration if publisher confirms should be used
+     * @return the queue binding
+     */
+    public ExchangeBinding<T> withPublisherConfirms(PublishConfirmConfiguration publishConfirmConfiguration) {
+      Objects.requireNonNull(publishConfirmConfiguration, "PublishConfirmConfiguration must not be null");
+      this.publishConfirmConfiguration = publishConfirmConfiguration;
       return this;
     }
 

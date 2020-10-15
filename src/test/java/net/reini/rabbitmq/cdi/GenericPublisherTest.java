@@ -34,8 +34,9 @@ import static org.mockito.Mockito.when;
 import java.io.IOException;
 import java.text.MessageFormat;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
-import java.util.function.BiConsumer;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -63,32 +64,31 @@ public class GenericPublisherTest {
   @Mock
   private Encoder<TestEvent> encoder;
   @Mock
-  private BiConsumer<TestEvent, PublishException> errorHandler;
+  private ErrorHandler<TestEvent> errorHandler;
 
   private List<ExchangeDeclaration> declarations = new ArrayList<>();
   private GenericPublisher<TestEvent> publisher;
   private TestEvent event;
   private Function<TestEvent, String> routingKeyFunction;
+  private PublishRetryHandler retryHandler;
+  private PublishConfirmConfiguration publishConfirmConfiguration;
 
   @BeforeEach
   public void setUp() throws Exception {
-    publisher = new GenericPublisher<TestEvent>(connectionRepository) {
-      @Override
-      protected void sleepBeforeRetry() {
-        // no delay
-      }
-    };
+    publisher = new GenericPublisher<TestEvent>(connectionRepository);
+    this.retryHandler = new DefaultPublishRetryHandler(3, 0);
     event = new TestEvent();
     event.id = "theId";
     event.booleanValue = true;
     routingKeyFunction = e -> "routingKey";
+    this.publishConfirmConfiguration = new PublishConfirmConfiguration(false);
   }
 
   @Test
   public void testPublish() throws Exception {
     Builder builder = new Builder();
     PublisherConfiguration<TestEvent> publisherConfiguration = new PublisherConfiguration(config,
-        "exchange", routingKeyFunction, builder, null, new JsonEncoder<>(), errorHandler, declarations);
+        "exchange", routingKeyFunction, builder, null, new JsonEncoder<>(), errorHandler, declarations, retryHandler, publishConfirmConfiguration);
     ArgumentCaptor<BasicProperties> propsCaptor = ArgumentCaptor.forClass(BasicProperties.class);
 
     when(connectionRepository.getConnection(config)).thenReturn(connection);
@@ -102,15 +102,237 @@ public class GenericPublisherTest {
   }
 
   @Test
-  public void testPublish_with_error() throws Exception {
+  public void testPublishBatchWithConfirms() throws Exception {
     Builder builder = new Builder();
+    final PublishConfirmConfiguration withConfirmConfig = new PublishConfirmConfiguration(true);
     PublisherConfiguration<TestEvent> publisherConfiguration = new PublisherConfiguration(config,
-        "exchange", routingKeyFunction, builder, null, new JsonEncoder<>(), errorHandler, declarations);
+        "exchange", routingKeyFunction, builder, null, new JsonEncoder<>(), errorHandler, declarations, retryHandler, withConfirmConfig);
     ArgumentCaptor<BasicProperties> propsCaptor = ArgumentCaptor.forClass(BasicProperties.class);
 
     when(connectionRepository.getConnection(config)).thenReturn(connection);
     when(connection.createChannel()).thenReturn(channel);
-    doThrow(new IOException("someError")).when(channel).basicPublish(eq("exchange"),
+
+    List<TestEvent> eventList = Collections.singletonList(event);
+    publisher.publishBatch(new RabbitMqBatchEvent<>(eventList, TestEvent.class), publisherConfiguration);
+
+    verify(channel).basicPublish(eq("exchange"), eq("routingKey"), propsCaptor.capture(),
+        eq("{\"id\":\"theId\",\"booleanValue\":true}".getBytes()));
+    verify(channel).waitForConfirmsOrDie();
+    assertEquals("application/json", propsCaptor.getValue().getContentType());
+  }
+
+  @Test
+  public void testPublishBatchWithConfirmsAndTimeout() throws Exception {
+    Builder builder = new Builder();
+    final int confirmTimeout = 3000;
+    final PublishConfirmConfiguration withConfirmConfig = new PublishConfirmConfiguration(true, confirmTimeout);
+    PublisherConfiguration<TestEvent> publisherConfiguration = new PublisherConfiguration(config,
+        "exchange", routingKeyFunction, builder, null, new JsonEncoder<>(), errorHandler, declarations, retryHandler, withConfirmConfig);
+    ArgumentCaptor<BasicProperties> propsCaptor = ArgumentCaptor.forClass(BasicProperties.class);
+
+    when(connectionRepository.getConnection(config)).thenReturn(connection);
+    when(connection.createChannel()).thenReturn(channel);
+
+    List<TestEvent> eventList = Collections.singletonList(event);
+    publisher.publishBatch(new RabbitMqBatchEvent<>(eventList, TestEvent.class), publisherConfiguration);
+
+    verify(channel).basicPublish(eq("exchange"), eq("routingKey"), propsCaptor.capture(),
+        eq("{\"id\":\"theId\",\"booleanValue\":true}".getBytes()));
+    verify(channel).waitForConfirmsOrDie(confirmTimeout);
+    assertEquals("application/json", propsCaptor.getValue().getContentType());
+  }
+
+  @Test
+  public void testPublishBatchWithConfirms_NackError() throws Exception {
+    Builder builder = new Builder();
+    final PublishConfirmConfiguration withConfirmConfig = new PublishConfirmConfiguration(true);
+    PublisherConfiguration<TestEvent> publisherConfiguration = new PublisherConfiguration(config,
+        "exchange", routingKeyFunction, builder, null, new JsonEncoder<>(), errorHandler, declarations, retryHandler, withConfirmConfig);
+    ArgumentCaptor<BasicProperties> propsCaptor = ArgumentCaptor.forClass(BasicProperties.class);
+
+    when(connectionRepository.getConnection(config)).thenReturn(connection);
+    when(connection.createChannel()).thenReturn(channel);
+    final IOException expectedCause = new IOException("nack");
+    doThrow(expectedCause).when(channel).waitForConfirmsOrDie();
+
+    List<TestEvent> eventList = Collections.singletonList(event);
+    final PublishException publishException = assertThrows(PublishException.class, () -> {
+      publisher.publishBatch(new RabbitMqBatchEvent<>(eventList, TestEvent.class), publisherConfiguration);
+    });
+    assertEquals("java.io.IOException: nack", publishException.getCause().getMessage());
+    verify(channel).basicPublish(eq("exchange"), eq("routingKey"), propsCaptor.capture(),
+        eq("{\"id\":\"theId\",\"booleanValue\":true}".getBytes()));
+    verify(channel).waitForConfirmsOrDie();
+    assertEquals("application/json", propsCaptor.getValue().getContentType());
+  }
+
+  @Test
+  public void testPublishBatchWithConfirms_timeout() throws Exception {
+    Builder builder = new Builder();
+    final int expectedTimeout = 3000;
+    final PublishConfirmConfiguration withConfirmConfig = new PublishConfirmConfiguration(true, expectedTimeout);
+    PublisherConfiguration<TestEvent> publisherConfiguration = new PublisherConfiguration(config,
+        "exchange", routingKeyFunction, builder, null, new JsonEncoder<>(), errorHandler, declarations, retryHandler, withConfirmConfig);
+    ArgumentCaptor<BasicProperties> propsCaptor = ArgumentCaptor.forClass(BasicProperties.class);
+
+    when(connectionRepository.getConnection(config)).thenReturn(connection);
+    when(connection.createChannel()).thenReturn(channel);
+    final TimeoutException expectedCause = new TimeoutException("timeout");
+    doThrow(expectedCause).when(channel).waitForConfirmsOrDie(expectedTimeout);
+    List<TestEvent> eventList = Collections.singletonList(event);
+    final PublishException publishException = assertThrows(PublishException.class, () -> {
+      publisher.publishBatch(new RabbitMqBatchEvent<>(eventList, TestEvent.class), publisherConfiguration);
+    });
+    assertEquals("java.util.concurrent.TimeoutException: timeout", publishException.getCause().getMessage());
+    verify(channel).basicPublish(eq("exchange"), eq("routingKey"), propsCaptor.capture(),
+        eq("{\"id\":\"theId\",\"booleanValue\":true}".getBytes()));
+    verify(channel).waitForConfirmsOrDie(expectedTimeout);
+    assertEquals("application/json", propsCaptor.getValue().getContentType());
+  }
+
+  @Test
+  public void testPublishBatchWithConfirms_interrupted() throws Exception {
+    Builder builder = new Builder();
+    final int expectedTimeout = 3000;
+    final PublishConfirmConfiguration withConfirmConfig = new PublishConfirmConfiguration(true, expectedTimeout);
+    PublisherConfiguration<TestEvent> publisherConfiguration = new PublisherConfiguration(config,
+        "exchange", routingKeyFunction, builder, null, new JsonEncoder<>(), errorHandler, declarations, retryHandler, withConfirmConfig);
+    ArgumentCaptor<BasicProperties> propsCaptor = ArgumentCaptor.forClass(BasicProperties.class);
+
+    when(connectionRepository.getConnection(config)).thenReturn(connection);
+    when(connection.createChannel()).thenReturn(channel);
+    final InterruptedException expectedCause = new InterruptedException("interrupted");
+    List<TestEvent> eventList = Collections.singletonList(event);
+    doThrow(expectedCause).when(channel).waitForConfirmsOrDie(expectedTimeout);
+    final PublishException publishException = assertThrows(PublishException.class, () -> {
+      publisher.publishBatch(new RabbitMqBatchEvent<>(eventList, TestEvent.class), publisherConfiguration);
+    });
+    assertEquals("java.lang.InterruptedException: interrupted", publishException.getCause().getMessage());
+    verify(channel).basicPublish(eq("exchange"), eq("routingKey"), propsCaptor.capture(),
+        eq("{\"id\":\"theId\",\"booleanValue\":true}".getBytes()));
+    verify(channel).waitForConfirmsOrDie(expectedTimeout);
+    assertEquals("application/json", propsCaptor.getValue().getContentType());
+  }
+
+  @Test
+  public void testPublishWithConfirms() throws Exception {
+    Builder builder = new Builder();
+    final PublishConfirmConfiguration withConfirmConfig = new PublishConfirmConfiguration(true);
+    PublisherConfiguration<TestEvent> publisherConfiguration = new PublisherConfiguration(config,
+        "exchange", routingKeyFunction, builder, null, new JsonEncoder<>(), errorHandler, declarations, retryHandler, withConfirmConfig);
+    ArgumentCaptor<BasicProperties> propsCaptor = ArgumentCaptor.forClass(BasicProperties.class);
+
+    when(connectionRepository.getConnection(config)).thenReturn(connection);
+    when(connection.createChannel()).thenReturn(channel);
+
+    publisher.publish(event, publisherConfiguration);
+
+    verify(channel).basicPublish(eq("exchange"), eq("routingKey"), propsCaptor.capture(),
+        eq("{\"id\":\"theId\",\"booleanValue\":true}".getBytes()));
+    verify(channel).waitForConfirmsOrDie();
+    assertEquals("application/json", propsCaptor.getValue().getContentType());
+  }
+
+  @Test
+  public void testPublishWithConfirmsAndTimeout() throws Exception {
+    Builder builder = new Builder();
+    final int confirmTimeout = 3000;
+    final PublishConfirmConfiguration withConfirmConfig = new PublishConfirmConfiguration(true, confirmTimeout);
+    PublisherConfiguration<TestEvent> publisherConfiguration = new PublisherConfiguration(config,
+        "exchange", routingKeyFunction, builder, null, new JsonEncoder<>(), errorHandler, declarations, retryHandler, withConfirmConfig);
+    ArgumentCaptor<BasicProperties> propsCaptor = ArgumentCaptor.forClass(BasicProperties.class);
+
+    when(connectionRepository.getConnection(config)).thenReturn(connection);
+    when(connection.createChannel()).thenReturn(channel);
+
+    publisher.publish(event, publisherConfiguration);
+
+    verify(channel).basicPublish(eq("exchange"), eq("routingKey"), propsCaptor.capture(),
+        eq("{\"id\":\"theId\",\"booleanValue\":true}".getBytes()));
+    verify(channel).waitForConfirmsOrDie(confirmTimeout);
+    assertEquals("application/json", propsCaptor.getValue().getContentType());
+  }
+
+  @Test
+  public void testPublishWithConfirms_NackError() throws Exception {
+    Builder builder = new Builder();
+    final PublishConfirmConfiguration withConfirmConfig = new PublishConfirmConfiguration(true);
+    PublisherConfiguration<TestEvent> publisherConfiguration = new PublisherConfiguration(config,
+        "exchange", routingKeyFunction, builder, null, new JsonEncoder<>(), errorHandler, declarations, retryHandler, withConfirmConfig);
+    ArgumentCaptor<BasicProperties> propsCaptor = ArgumentCaptor.forClass(BasicProperties.class);
+
+    when(connectionRepository.getConnection(config)).thenReturn(connection);
+    when(connection.createChannel()).thenReturn(channel);
+    final IOException expectedCause = new IOException("nack");
+    doThrow(expectedCause).when(channel).waitForConfirmsOrDie();
+    final PublishException publishException = assertThrows(PublishException.class, () -> {
+      publisher.publish(event, publisherConfiguration);
+    });
+    assertEquals("java.io.IOException: nack", publishException.getCause().getMessage());
+    verify(channel).basicPublish(eq("exchange"), eq("routingKey"), propsCaptor.capture(),
+        eq("{\"id\":\"theId\",\"booleanValue\":true}".getBytes()));
+    verify(channel).waitForConfirmsOrDie();
+    assertEquals("application/json", propsCaptor.getValue().getContentType());
+  }
+
+  @Test
+  public void testPublishWithConfirms_timeout() throws Exception {
+    Builder builder = new Builder();
+    final int expectedTimeout = 3000;
+    final PublishConfirmConfiguration withConfirmConfig = new PublishConfirmConfiguration(true, expectedTimeout);
+    PublisherConfiguration<TestEvent> publisherConfiguration = new PublisherConfiguration(config,
+        "exchange", routingKeyFunction, builder, null, new JsonEncoder<>(), errorHandler, declarations, retryHandler, withConfirmConfig);
+    ArgumentCaptor<BasicProperties> propsCaptor = ArgumentCaptor.forClass(BasicProperties.class);
+
+    when(connectionRepository.getConnection(config)).thenReturn(connection);
+    when(connection.createChannel()).thenReturn(channel);
+    final TimeoutException expectedCause = new TimeoutException("timeout");
+    doThrow(expectedCause).when(channel).waitForConfirmsOrDie(expectedTimeout);
+    final PublishException publishException = assertThrows(PublishException.class, () -> {
+      publisher.publish(event, publisherConfiguration);
+    });
+    assertEquals("java.util.concurrent.TimeoutException: timeout", publishException.getCause().getMessage());
+    verify(channel).basicPublish(eq("exchange"), eq("routingKey"), propsCaptor.capture(),
+        eq("{\"id\":\"theId\",\"booleanValue\":true}".getBytes()));
+    verify(channel).waitForConfirmsOrDie(expectedTimeout);
+    assertEquals("application/json", propsCaptor.getValue().getContentType());
+  }
+
+  @Test
+  public void testPublishWithConfirms_interrupted() throws Exception {
+    Builder builder = new Builder();
+    final int expectedTimeout = 3000;
+    final PublishConfirmConfiguration withConfirmConfig = new PublishConfirmConfiguration(true, expectedTimeout);
+    PublisherConfiguration<TestEvent> publisherConfiguration = new PublisherConfiguration(config,
+        "exchange", routingKeyFunction, builder, null, new JsonEncoder<>(), errorHandler, declarations, retryHandler, withConfirmConfig);
+    ArgumentCaptor<BasicProperties> propsCaptor = ArgumentCaptor.forClass(BasicProperties.class);
+
+    when(connectionRepository.getConnection(config)).thenReturn(connection);
+    when(connection.createChannel()).thenReturn(channel);
+    final InterruptedException expectedCause = new InterruptedException("interrupted");
+    doThrow(expectedCause).when(channel).waitForConfirmsOrDie(expectedTimeout);
+    final PublishException publishException = assertThrows(PublishException.class, () -> {
+      publisher.publish(event, publisherConfiguration);
+    });
+    assertEquals("java.lang.InterruptedException: interrupted", publishException.getCause().getMessage());
+    verify(channel).basicPublish(eq("exchange"), eq("routingKey"), propsCaptor.capture(),
+        eq("{\"id\":\"theId\",\"booleanValue\":true}".getBytes()));
+    verify(channel).waitForConfirmsOrDie(expectedTimeout);
+    assertEquals("application/json", propsCaptor.getValue().getContentType());
+  }
+
+  @Test
+  public void testPublish_with_error() throws Exception {
+    Builder builder = new Builder();
+    PublisherConfiguration<TestEvent> publisherConfiguration = new PublisherConfiguration(config,
+        "exchange", routingKeyFunction, builder, null, new JsonEncoder<>(), errorHandler, declarations, retryHandler, publishConfirmConfiguration);
+    ArgumentCaptor<BasicProperties> propsCaptor = ArgumentCaptor.forClass(BasicProperties.class);
+
+    final IOException retryableError = new IOException("someError");
+    when(errorHandler.isRetryable(retryableError)).thenReturn(true);
+    when(connectionRepository.getConnection(config)).thenReturn(connection);
+    when(connection.createChannel()).thenReturn(channel);
+    doThrow(retryableError).when(channel).basicPublish(eq("exchange"),
         eq("routingKey"), propsCaptor.capture(),
         eq("{\"id\":\"theId\",\"booleanValue\":true}".getBytes()));
 
@@ -125,7 +347,7 @@ public class GenericPublisherTest {
   public void testPublish_withEncodeException() throws Exception {
     Builder builder = new Builder();
     PublisherConfiguration<TestEvent> publisherConfiguration = new PublisherConfiguration(config,
-        "exchange", routingKeyFunction, builder, null, encoder, errorHandler, declarations);
+        "exchange", routingKeyFunction, builder, null, encoder, errorHandler, declarations, retryHandler, publishConfirmConfiguration);
 
     when(connectionRepository.getConnection(config)).thenReturn(connection);
     when(connection.createChannel()).thenReturn(channel);
@@ -138,60 +360,10 @@ public class GenericPublisherTest {
   }
 
   @Test
-  public void testPublish_withTooManyAttempts() throws Exception {
-    publisher = new GenericPublisher<TestEvent>(connectionRepository) {
-      @Override
-      protected void handleIoException(int attempt, Throwable cause) throws PublishException {
-        // do not throw to allow attempts to overrun DEFAULT_RETRY_ATTEMPTS
-      }
-
-      @Override
-      protected void sleepBeforeRetry() {
-        // no delay
-      }
-    };
-
-    Builder builder = new Builder();
-    PublisherConfiguration<TestEvent> publisherConfiguration = new PublisherConfiguration(config,
-        "exchange", routingKeyFunction, builder, null, new JsonEncoder<>(), errorHandler, declarations);
-    ArgumentCaptor<BasicProperties> propsCaptor = ArgumentCaptor.forClass(BasicProperties.class);
-
-    when(connectionRepository.getConnection(config)).thenReturn(connection);
-    when(connection.createChannel()).thenReturn(channel);
-    doThrow(new IOException("someError")).when(channel).basicPublish(eq("exchange"),
-        eq("routingKey"), propsCaptor.capture(),
-        eq("{\"id\":\"theId\",\"booleanValue\":true}".getBytes()));
-
-    publisher.publish(event, publisherConfiguration);
-    assertEquals("application/json", propsCaptor.getValue().getContentType());
-  }
-
-  @Test
-  public void testPublish_with_FatalError() throws Exception {
-    Builder builder = new Builder();
-    PublisherConfiguration<TestEvent> publisherConfiguration = new PublisherConfiguration(config,
-        "exchange",
-        routingKeyFunction, builder, null, new JsonEncoder<>(), errorHandler, declarations);
-    ArgumentCaptor<BasicProperties> propsCaptor = ArgumentCaptor.forClass(BasicProperties.class);
-
-    when(connectionRepository.getConnection(config)).thenReturn(connection);
-    when(connection.createChannel()).thenReturn(channel);
-    doThrow(new IOException("someError")).when(channel).basicPublish(eq("exchange"),
-        eq("routingKey"), propsCaptor.capture(),
-        eq("{\"id\":\"theId\",\"booleanValue\":true}".getBytes()));
-
-    Throwable exception = assertThrows(PublishException.class, () -> {
-      publisher.publish(event, publisherConfiguration);
-    });
-    assertEquals("Unable to send message after 3 attempts", exception.getMessage());
-    assertEquals("application/json", propsCaptor.getValue().getContentType());
-  }
-
-  @Test
   public void testPublish_with_custom_MessageConverter() throws Exception {
     Builder builder = new Builder();
     PublisherConfiguration<TestEvent> publisherConfiguration = new PublisherConfiguration(config,
-        "exchange", routingKeyFunction, builder, null, new CustomEncoder(), errorHandler, declarations);
+        "exchange", routingKeyFunction, builder, null, new CustomEncoder(), errorHandler, declarations, retryHandler, publishConfirmConfiguration);
     ArgumentCaptor<BasicProperties> propsCaptor = ArgumentCaptor.forClass(BasicProperties.class);
 
     when(connectionRepository.getConnection(config)).thenReturn(connection);
@@ -209,23 +381,6 @@ public class GenericPublisherTest {
     publisher.close();
   }
 
-  @Test
-  public void testHandleIoException_channel_null() throws PublishException {
-    publisher.handleIoException(1, null);
-  }
-
-  @Test
-  public void testSleepBeforeRetry_real_wait() {
-    publisher = new GenericPublisher<>(connectionRepository);
-    publisher.sleepBeforeRetry();
-  }
-
-  @Test
-  public void testSleepBeforeRetry_InterruptedException() throws InterruptedException {
-    publisher = new GenericPublisher<>(connectionRepository);
-    call_SleepBeforeRetry_InAnotherThread_AndInterrupt();
-  }
-
   public static class CustomEncoder implements Encoder<TestEvent> {
     @Override
     public String contentType() {
@@ -239,17 +394,5 @@ public class GenericPublisherTest {
           MessageFormat.format("Id: {0}, BooleanValue: {1}", event.getId(), event.isBooleanValue());
       return str.getBytes();
     }
-  }
-
-  private void call_SleepBeforeRetry_InAnotherThread_AndInterrupt() throws InterruptedException {
-    Thread sleeper = new Thread("sleeper") {
-      @Override
-      public void run() {
-        publisher.sleepBeforeRetry();
-      }
-    };
-    sleeper.start();
-    Thread.sleep(GenericPublisher.DEFAULT_RETRY_INTERVAL / 4);
-    sleeper.interrupt();
   }
 }

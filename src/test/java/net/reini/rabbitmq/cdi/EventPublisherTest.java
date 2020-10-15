@@ -27,6 +27,7 @@ package net.reini.rabbitmq.cdi;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -35,7 +36,6 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeoutException;
-import java.util.function.BiConsumer;
 import java.util.function.Function;
 
 import javax.enterprise.event.TransactionPhase;
@@ -58,6 +58,7 @@ import com.rabbitmq.client.Connection;
  */
 @ExtendWith(MockitoExtension.class)
 public class EventPublisherTest {
+  public static final int EXPECTED_RETRIES_ON_FAILURE = 3;
   @Mock
   private ConnectionRepository connectionRepository;
   @Mock
@@ -67,20 +68,24 @@ public class EventPublisherTest {
   @Mock
   private Channel channel;
   @Mock
-  private BiConsumer<TestEvent, PublishException> errorHandler;
+  private ErrorHandler<TestEvent> errorHandler;
 
   private List<ExchangeDeclaration> declarations = new ArrayList<>();
   private EventPublisher publisher;
   private Builder basicProperties;
   private JsonEncoder<TestEvent> encoder;
   private Function<TestEvent, String> routingKeyFunction;
+  private PublishRetryHandler retryHandler;
+  private PublishConfirmConfiguration publishConfirmConfiguration;
 
   @BeforeEach
   public void setUp() throws Exception {
     publisher = new EventPublisher(connectionRepository);
+    this.retryHandler = new DefaultPublishRetryHandler(EXPECTED_RETRIES_ON_FAILURE, 0);
     basicProperties = new BasicProperties.Builder();
     encoder = new JsonEncoder<>();
     routingKeyFunction = e -> "routingKey";
+    this.publishConfirmConfiguration = new PublishConfirmConfiguration(false);
   }
 
   /**
@@ -95,7 +100,7 @@ public class EventPublisherTest {
    * Test method for {@link EventPublisher#addEvent(EventKey, PublisherConfiguration)},
    * {@link EventPublisher#publishEvent(Object, TransactionPhase)} and
    * {@link EventPublisher#cleanUp()}.
-   * 
+   *
    * @throws TimeoutException
    * @throws IOException
    */
@@ -106,12 +111,67 @@ public class EventPublisherTest {
     when(connection.createChannel()).thenReturn(channel);
 
     publisher.addEvent(key, new PublisherConfiguration(config, "exchange", routingKeyFunction,
-        basicProperties, null, encoder, errorHandler, declarations));
+        basicProperties, null, encoder, errorHandler, declarations, retryHandler, publishConfirmConfiguration));
     publisher.publishEvent(new TestEvent(), TransactionPhase.AFTER_SUCCESS);
     publisher.cleanUp();
 
     verify(channel).basicPublish(eq("exchange"), eq("routingKey"), any(), any());
     verify(channel).close();
+  }
+
+  @Test
+  public void testPublishBatchEvent() throws IOException, TimeoutException {
+    EventKey<TestEvent> key = EventKey.of(TestEvent.class, TransactionPhase.AFTER_SUCCESS);
+    when(connectionRepository.getConnection(config)).thenReturn(connection);
+    when(connection.createChannel()).thenReturn(channel);
+
+    publisher.addEvent(key, new PublisherConfiguration(config, "exchange", routingKeyFunction,
+        basicProperties, null, encoder, errorHandler, declarations, retryHandler, publishConfirmConfiguration));
+    List<TestEvent> eventList = new ArrayList<>();
+    eventList.add(new TestEvent());
+    eventList.add(new TestEvent());
+    publisher.publishEvent(new RabbitMqBatchEvent<>(eventList, TestEvent.class), TransactionPhase.AFTER_SUCCESS);
+    publisher.cleanUp();
+
+    verify(channel, times(2)).basicPublish(eq("exchange"), eq("routingKey"), any(), any());
+    verify(channel).close();
+  }
+
+  @Test
+  public void testPublishBatchEventWithoutPublisher() throws IOException, TimeoutException {
+    EventKey<Object> key = EventKey.of(Object.class, TransactionPhase.AFTER_SUCCESS);
+
+    publisher.addEvent(key, new PublisherConfiguration(config, "exchange", routingKeyFunction,
+        basicProperties, null, encoder, errorHandler, declarations, retryHandler, publishConfirmConfiguration));
+    List<TestEvent> eventList = new ArrayList<>();
+    eventList.add(new TestEvent());
+    eventList.add(new TestEvent());
+    publisher.publishEvent(new RabbitMqBatchEvent<>(eventList, TestEvent.class), TransactionPhase.AFTER_SUCCESS);
+    publisher.cleanUp();
+
+    verify(channel, never()).basicPublish(eq("exchange"), eq("routingKey"), any(), any());
+    verify(channel, never()).close();
+  }
+
+  @Test
+  public void testPublishBatchWithError() throws IOException, TimeoutException {
+    EventKey<TestEvent> key = EventKey.of(TestEvent.class, TransactionPhase.AFTER_SUCCESS);
+
+    when(errorHandler.isRetryable(any())).thenReturn(true);
+    when(connectionRepository.getConnection(config)).thenReturn(connection);
+    when(connection.createChannel()).thenReturn(channel);
+    publisher.addEvent(key, new PublisherConfiguration(config, "exchange", routingKeyFunction,
+        basicProperties, null, encoder, errorHandler, declarations, retryHandler, publishConfirmConfiguration));
+    List<TestEvent> eventList = new ArrayList<>();
+    eventList.add(new TestEvent());
+    eventList.add(new TestEvent());
+    doThrow(IOException.class).when(channel).basicPublish(eq("exchange"), eq("routingKey"), any(),
+        any());
+    publisher.publishEvent(new RabbitMqBatchEvent<>(eventList, TestEvent.class), TransactionPhase.AFTER_SUCCESS);
+    publisher.cleanUp();
+
+    verify(channel, times(EXPECTED_RETRIES_ON_FAILURE)).basicPublish(eq("exchange"), eq("routingKey"), any(), any());
+    verify(channel, times(EXPECTED_RETRIES_ON_FAILURE)).close();
   }
 
   /**
@@ -125,18 +185,19 @@ public class EventPublisherTest {
   @Test
   public void testPublishEvent_failing() throws IOException, TimeoutException {
     EventKey<TestEvent> key = EventKey.of(TestEvent.class, TransactionPhase.AFTER_FAILURE);
-
+    when(errorHandler.isRetryable(any())).thenReturn(true);
     when(connectionRepository.getConnection(config)).thenReturn(connection);
     when(connection.createChannel()).thenReturn(channel);
     doThrow(IOException.class).when(channel).basicPublish(eq("exchange"), eq("routingKey"), any(),
         any());
 
     publisher.addEvent(key, new PublisherConfiguration(config, "exchange", routingKeyFunction,
-        basicProperties, null, encoder, errorHandler, declarations));
+        basicProperties, null, encoder, errorHandler, declarations, retryHandler, publishConfirmConfiguration));
     publisher.publishEvent(new TestEvent(), TransactionPhase.AFTER_FAILURE);
     publisher.cleanUp();
 
-    verify(channel, times(3)).close();
+    verify(channel, times(EXPECTED_RETRIES_ON_FAILURE)).basicPublish(eq("exchange"), eq("routingKey"), any(), any());
+    verify(channel, times(EXPECTED_RETRIES_ON_FAILURE)).close();
   }
 
   @Test
@@ -147,7 +208,7 @@ public class EventPublisherTest {
     when(connection.createChannel()).thenReturn(channel);
 
     publisher.addEvent(key, new PublisherConfiguration(config, "exchange", routingKeyFunction,
-        basicProperties, null, encoder, errorHandler, declarations));
+        basicProperties, null, encoder, errorHandler, declarations, retryHandler, publishConfirmConfiguration));
     publisher.onEventInProgress(new TestEvent());
     publisher.cleanUp();
 
@@ -163,7 +224,7 @@ public class EventPublisherTest {
     when(connection.createChannel()).thenReturn(channel);
 
     publisher.addEvent(key, new PublisherConfiguration(config, "exchange", routingKeyFunction,
-        basicProperties, null, encoder, errorHandler, declarations));
+        basicProperties, null, encoder, errorHandler, declarations, retryHandler, publishConfirmConfiguration));
     publisher.onEventBeforeCompletion(new TestEvent());
     publisher.cleanUp();
 
@@ -179,7 +240,7 @@ public class EventPublisherTest {
     when(connection.createChannel()).thenReturn(channel);
 
     publisher.addEvent(key, new PublisherConfiguration(config, "exchange", routingKeyFunction,
-        basicProperties, null, encoder, errorHandler, declarations));
+        basicProperties, null, encoder, errorHandler, declarations, retryHandler, publishConfirmConfiguration));
     publisher.onEventAfterCompletion(new TestEvent());
     publisher.cleanUp();
 
@@ -195,7 +256,7 @@ public class EventPublisherTest {
     when(connection.createChannel()).thenReturn(channel);
 
     publisher.addEvent(key, new PublisherConfiguration(config, "exchange", routingKeyFunction,
-        basicProperties, null, encoder, errorHandler, declarations));
+        basicProperties, null, encoder, errorHandler, declarations, retryHandler, publishConfirmConfiguration));
     publisher.onEventAfterFailure(new TestEvent());
     publisher.cleanUp();
 
@@ -211,7 +272,7 @@ public class EventPublisherTest {
     when(connection.createChannel()).thenReturn(channel);
 
     publisher.addEvent(key, new PublisherConfiguration(config, "exchange", routingKeyFunction,
-        basicProperties, null, encoder, errorHandler, declarations));
+        basicProperties, null, encoder, errorHandler, declarations, retryHandler, publishConfirmConfiguration));
     publisher.onEventAfterSuccess(new TestEvent());
     publisher.cleanUp();
 

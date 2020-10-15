@@ -24,30 +24,27 @@
 
 package net.reini.rabbitmq.cdi;
 
-public interface MessagePublisher<T> {
+/**
+ * The Configuration of publisher confirms. A timeout value of zero means wait forever in case publisher confirms are enabled.
+ */
+public class PublishConfirmConfiguration {
+  private final long timeout;
+  private final boolean usePublisherConfirms;
 
-  /**
-   * Publishes the given event using the given publisher configuration template.
-   * 
-   * @param event the event being published to RabbitMQ
-   * @param publisherConfiguration the default publisher configuration
-   * @throws PublishException if the event could not be delivered to RabbitMQ
-   */
-  void publish(T event, PublisherConfiguration<T> publisherConfiguration)
-      throws PublishException;
+  public PublishConfirmConfiguration(boolean usePublisherConfirms) {
+    this(usePublisherConfirms, 0);
+  }
 
-  /**
-   * Publishes the given batch event using the given publisher configuration template.
-   *
-   * @param batchEvent Contains the events being published to RabbitMQ
-   * @param publisherConfiguration the default publisher configuration
-   * @throws PublishException if the event could not be delivered to RabbitMQ
-   */
-  void publishBatch(RabbitMqBatchEvent<T> batchEvent, PublisherConfiguration<T> publisherConfiguration)
-      throws PublishException;
+  public PublishConfirmConfiguration(boolean usePublisherConfirms, long timeout) {
+    this.timeout = timeout;
+    this.usePublisherConfirms = usePublisherConfirms;
+  }
 
-  /**
-   * Closes the publisher by closing its underlying channel.
-   */
-  void close();
+  public long getTimeout() {
+    return timeout;
+  }
+
+  public boolean usePublisherConfirms() {
+    return usePublisherConfirms;
+  }
 }
